@@ -2,7 +2,7 @@
 App::uses('AssetConfig', 'AssetCompress.Lib');
 App::uses('AssetCompiler', 'AssetCompress.Lib');
 App::uses('AssetCache', 'AssetCompress.Lib');
-
+App::uses('IniWriter', 'AssetCompress.Lib');
 App::uses('Folder', 'Utility');
 
 /**
@@ -23,10 +23,37 @@ class AssetCompressShell extends Shell {
 	public function startup() {
 		parent::startup();
 
+		if (!is_file($this->params['config'])) {
+			if ($this->command != 'generate_ini') {
+				$this->out("Ini file was not found at " . $this->params['config']);
+				$this->out("Create out manually or run `generate_ini` command to generate one.");
+				exit();
+			}
+			return;
+		}
+
 		AssetConfig::clearAllCachedKeys();
 		$this->_Config = AssetConfig::buildFromIniFile($this->params['config']);
 		$this->AssetBuild->setThemes($this->_findThemes());
 		$this->out();
+	}
+
+	public function generate_ini() {
+		$this->out("Generating build targets...");
+		$buildTargets = $this->_generateBuildTargets();
+		$iniPath = $this->params['config'];
+		if (is_file($iniPath)) {
+			$this->out("Ini file already exists - creating a backup at {$iniPath}.original and continuing");
+			if (!copy($iniPath, $iniPath . '.original')) {
+				throw new Exception("Could not backup original AssetCompress ini file");
+			}
+		}
+		$this->out("Writing ini file...");
+		if (IniWriter::write($iniPath, $buildTargets)) {
+			$this->out("Generating ini file was successful");
+		} else {
+			$this->err("There was a problem saving the ini file");
+		}
 	}
 
 /**
@@ -99,6 +126,87 @@ class AssetCompressShell extends Shell {
 		$this->out('Clearing build timestamp.');
 		$this->out();
 		AssetConfig::clearBuildTimeStamp();
+	}
+
+	protected function _generateBuildTargets() {
+		$buildTargets = array();
+
+		// App assets
+		$appWebrootPath = APP . WEBROOT_DIR;
+		$AppWebrootFolder = new Folder($appWebrootPath);
+		$css = $AppWebrootFolder->findRecursive('.+?\.css');
+		$js = $AppWebrootFolder->findRecursive('.+?\.js');
+		$buildTargets['styles.css']['paths'] = $this->_sanitizePaths($css, $appWebrootPath, 'css', false, false);
+		$buildTargets['scripts.js']['paths'] = $this->_sanitizePaths($js, $appWebrootPath, 'js', false, false);
+
+		// Plugin assets
+		$pluginPaths = App::path('Plugin');
+		foreach($pluginPaths as $pluginPath) {
+			$PluginFolder = new Folder($pluginPath);
+			list($plugins) = $PluginFolder->read(false, true);
+			foreach($plugins as $plugin) {
+				if ($plugin == 'AssetCompress') {
+					continue;
+				}
+
+				$pluginWebrootPath = $pluginPath . $plugin . DS . 'webroot';
+				if (is_dir($pluginWebrootPath)) {
+					$PluginWebrootFolder = new Folder($pluginWebrootPath);
+					$pluginName = Inflector::underscore($plugin);
+					$css = $PluginWebrootFolder->findRecursive('.+?\.css');
+					$js = $PluginWebrootFolder->findRecursive('.+?\.js');
+					$buildTargets[$pluginName . '.styles.css']['paths'] = $this->_sanitizePaths($css,
+						$pluginWebrootPath, 'css', $plugin, false);
+					$buildTargets[$pluginName . '.scripts.js']['paths'] = $this->_sanitizePaths($js,
+						$pluginWebrootPath, 'js', $plugin, false);
+				}
+			}
+		}
+
+		// Themed assets
+		$viewPaths = App::path('View');
+		foreach ($viewPaths as $viewPath) {
+			if (is_dir($viewPath . 'Themed')) {
+				$ThemedFolder = new Folder($viewPath . 'Themed');
+				list($themes) = $ThemedFolder->read(false, true);
+				foreach($themes as $theme) {
+					$themeWebrootPath = $viewPath . 'Themed' . DS . $theme . DS . 'webroot';
+					if (is_dir($themeWebrootPath)) {
+						$ThemeWebrootFolder = new Folder($themeWebrootPath);
+						$themeName = Inflector::underscore($theme);
+						$css = $ThemeWebrootFolder->findRecursive('.+?\.css');
+						$js = $ThemeWebrootFolder->findRecursive('.+?\.js');
+						$buildTargets[$themeName . '.styles.css'] = array(
+							'theme' => true,
+							'paths' => $this->_sanitizePaths($css, $themeWebrootPath, 'css', false, true),
+						);
+						$buildTargets[$themeName . '.scripts.js']= array(
+							'theme' => true,
+							'paths' => $this->_sanitizePaths($js, $themeWebrootPath, 'js', false, true),
+						);
+					}
+				}
+			}
+		}
+		return $buildTargets;
+	}
+
+	protected function _sanitizePaths($paths, $base, $asset, $plugin = false, $theme = false) {
+		foreach($paths as &$path) {
+			$path = str_replace($base . DS, '', $path);
+			if (strpos($path, $asset . DS) === 0) {
+				$path = substr($path, strlen($asset) + 1);
+			} else {
+				$path = DS . $path;
+			}
+			if ($plugin !== false) {
+				$path = "p:{$plugin}:{$path}";
+			}
+			if ($theme === true) {
+				$path = "theme:{$path}";
+			}
+		}
+		return $paths;
 	}
 
 /**
@@ -174,6 +282,8 @@ class AssetCompressShell extends Shell {
 			'',
 			'Builds and clears assets defined in you asset_compress.ini',
 			'file and in your view files.'
+		))->addSubcommand('generate_ini', array(
+			'help' => 'Generates ini file with all assets in one build target.'
 		))->addSubcommand('clear', array(
 			'help' => 'Clears all builds defined in the ini file.'
 		))->addSubcommand('build', array(
